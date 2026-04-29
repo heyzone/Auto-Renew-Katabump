@@ -111,7 +111,7 @@ class KatabumpAutoRenew:
         self.driver.set_window_size(1280, 720)
 
     def _handle_turnstile(self, context=""):
-        """优化后的 Cloudflare 验证逻辑"""
+        """登录页 Cloudflare Turnstile 验证逻辑（保持不变）"""
         try:
             container = WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "cf-turnstile"))
@@ -129,9 +129,9 @@ class KatabumpAutoRenew:
             actions.pause(random.uniform(0.1, 0.25))
             actions.release()
             actions.perform()
-            
+
             logger.info(f"🖱️ {self.masked_user} - [{context}] 执行偏移点击...")
-            
+
             # 轮询检查 Token
             validated = False
             for _ in range(15):
@@ -147,6 +147,113 @@ class KatabumpAutoRenew:
             return validated
         except Exception as e:
             logger.error(f"❌ {self.masked_user} - [{context}] 验证交互失败: {e}")
+            return False
+
+    def _handle_altcha(self, context=""):
+        """
+        处理续期弹窗中的 ALTCHA 验证（"I'm not a robot" 复选框）。
+        ALTCHA 是纯本地 PoW 验证，点击 checkbox 后会自动在后台完成计算，
+        计算完成后 checkbox 变为选中状态，hidden input altcha 会被填充。
+        """
+        logger.info(f"🔐 {self.masked_user} - [{context}] 开始处理 ALTCHA 验证...")
+        try:
+            # 等待 ALTCHA widget 出现（altcha-widget 自定义元素 或 包含 checkbox 的容器）
+            # 优先尝试 altcha-widget 自定义元素
+            altcha_widget = None
+            checkbox = None
+
+            # 策略1: 直接找 altcha-widget 自定义元素内的 checkbox
+            try:
+                altcha_widget = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "altcha-widget"))
+                )
+                logger.info(f"🔍 {self.masked_user} - [{context}] 找到 altcha-widget 元素")
+                # altcha-widget 使用 shadow DOM
+                shadow_root = self.driver.execute_script("return arguments[0].shadowRoot", altcha_widget)
+                if shadow_root:
+                    checkbox = shadow_root.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                    logger.info(f"🔍 {self.masked_user} - [{context}] 通过 Shadow DOM 找到 checkbox")
+            except Exception:
+                pass
+
+            # 策略2: 直接在页面中查找 checkbox（非 shadow DOM 情况）
+            if not checkbox:
+                try:
+                    checkbox = WebDriverWait(self.driver, 8).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='checkbox']"))
+                    )
+                    logger.info(f"🔍 {self.masked_user} - [{context}] 直接找到页面 checkbox")
+                except Exception:
+                    pass
+
+            if not checkbox:
+                logger.error(f"❌ {self.masked_user} - [{context}] 未找到 ALTCHA checkbox")
+                return False
+
+            # 人工延迟后点击 checkbox
+            sleep(800 + random.random() * 600)
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+            sleep(500 + random.random() * 300)
+
+            # 尝试正常点击，失败则用 JS 点击
+            try:
+                actions = ActionChains(self.driver)
+                actions.move_to_element(checkbox)
+                actions.pause(random.uniform(0.3, 0.6))
+                actions.click()
+                actions.perform()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", checkbox)
+
+            logger.info(f"🖱️ {self.masked_user} - [{context}] 已点击 ALTCHA checkbox，等待 PoW 计算完成...")
+
+            # 轮询等待验证完成
+            # ALTCHA 完成后：checkbox 被选中 且 hidden input[name='altcha'] 有值
+            verified = False
+            for attempt in range(20):  # 最多等待 20 秒
+                sleep(1000)
+                try:
+                    # 检查方式1：checkbox 是否已选中
+                    is_checked = self.driver.execute_script("return arguments[0].checked;", checkbox)
+
+                    # 检查方式2：altcha hidden input 是否有值（页面直接查找）
+                    altcha_value = self.driver.execute_script(
+                        "var el = document.querySelector(\"input[name='altcha']\");"
+                        "return el ? el.value : '';"
+                    )
+
+                    # 检查方式3：shadow DOM 内的 hidden input
+                    if not altcha_value and altcha_widget:
+                        try:
+                            shadow_root = self.driver.execute_script("return arguments[0].shadowRoot", altcha_widget)
+                            if shadow_root:
+                                hidden_el = shadow_root.find_element(By.CSS_SELECTOR, "input[type='hidden']")
+                                altcha_value = hidden_el.get_attribute("value") or ""
+                        except Exception:
+                            pass
+
+                    logger.info(f"   [{context}] 轮询 {attempt+1}/20 - checked={is_checked}, altcha_value_len={len(altcha_value)}")
+
+                    if is_checked and len(altcha_value) > 10:
+                        logger.info(f"✅ {self.masked_user} - [{context}] ALTCHA 验证通过！")
+                        sleep(800 + random.random() * 500)
+                        verified = True
+                        break
+                    elif is_checked and attempt >= 5:
+                        # checkbox 已选中但没有 hidden value（某些实现可能不用 hidden input）
+                        logger.info(f"✅ {self.masked_user} - [{context}] ALTCHA checkbox 已选中，视为通过")
+                        sleep(800 + random.random() * 500)
+                        verified = True
+                        break
+                except Exception as poll_err:
+                    logger.warning(f"   [{context}] 轮询出错: {poll_err}")
+
+            if not verified:
+                logger.error(f"❌ {self.masked_user} - [{context}] ALTCHA 验证等待超时")
+            return verified
+
+        except Exception as e:
+            logger.error(f"❌ {self.masked_user} - [{context}] ALTCHA 处理异常: {e}")
             return False
 
     def process(self):
@@ -166,14 +273,14 @@ class KatabumpAutoRenew:
             raise Exception("未找到密码输入框")
         sleep(2000 + random.random() * 1000)
 
-        # --- 登录页 CF 验证 ---
+        # --- 登录页 CF Turnstile 验证（保持不变）---
         self._handle_turnstile("Login Auth")
 
-        logger.info(f"📤 {self.masked_user} - 点击“Login”提交登录...")
+        logger.info(f"📤 {self.masked_user} - 点击"Login"提交登录...")
         self.driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         human_delay()
 
-        # --- 第三步： Manage Server ---
+        # --- 第三步：Manage Server ---
         logger.info(f"🎯 {self.masked_user} - 进入服务器详情页...")
         manage_btn = WebDriverWait(self.driver, 30).until(
             EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'See')]"))
@@ -183,7 +290,7 @@ class KatabumpAutoRenew:
         self.driver.execute_script("arguments[0].click();", manage_btn)
         human_delay()
 
-        # --- 第四步： Renew Server ---
+        # --- 第四步：Renew Server ---
         logger.info(f"🔄 {self.masked_user} - 准备续期流程...")
         initial_expiry = ""
         try:
@@ -206,8 +313,10 @@ class KatabumpAutoRenew:
             raise Exception(f"无法打开弹窗: {e}")
         sleep(2000 + random.random() * 1000)
 
-        # --- 续期弹窗 CF 验证 ---
-        self._handle_turnstile("Renew Modal")
+        # --- 续期弹窗：改用 ALTCHA 验证 ---
+        altcha_ok = self._handle_altcha("Renew Modal")
+        if not altcha_ok:
+            logger.warning(f"⚠️ {self.masked_user} - ALTCHA 验证未通过，仍尝试提交...")
 
         # --- 最终 Renew 按钮 ---
         try:
@@ -219,7 +328,7 @@ class KatabumpAutoRenew:
             self.driver.execute_script("arguments[0].click();", confirm_btn)
         except Exception as e:
             raise Exception(f"弹窗内提交失败: {e}")
-            
+
         logger.info(f"⏳ {self.masked_user} - 等待数据更新...")
         sleep(7000 + random.random() * 2000)
 
@@ -230,7 +339,7 @@ class KatabumpAutoRenew:
                 alertmsg = alerts[0].text.strip().replace('×', '')
                 logger.warning(f"⚠️ {self.masked_user} - 续期失败: {alertmsg}")
                 return False, f"⏳ {self.masked_user}\n⚠️ 续期失败: {alertmsg}"
-            
+
             final_expiry_element = self.driver.find_element(By.XPATH, "//div[contains(text(), 'Expiry')]/following-sibling::div")
             final_expiry = final_expiry_element.text.strip()
             logger.info(f"✅ {self.masked_user} - 续期后到期时间: {final_expiry}")
@@ -246,33 +355,33 @@ class KatabumpAutoRenew:
         """引入重试机制的核心运行逻辑"""
         max_retries = 3
         last_error = ""
-        
+
         for attempt in range(max_retries):
             try:
                 if not self.driver:
                     self.setup_driver()
-                
+
                 if attempt > 0:
                     logger.info(f"🔄 {self.masked_user} - 正在进行第 {attempt + 1} 次尝试...")
                     self.driver.refresh()
                     sleep(5000 + random.random() * 3000)
 
                 success, message = self.process()
-                
+
                 if success:
                     return True, message
                 else:
                     last_error = message
                     if "时间未更新" in message or "续期失败" in message:
                         break
-                    
+
             except Exception as e:
                 last_error = f"异常：{str(e)[:50]}"
                 logger.error(f"❌ {self.masked_user} 第 {attempt + 1} 次执行出错: {e}")
-                
+
             if attempt < max_retries - 1:
                 sleep(5000 + random.random() * 5000)
-        
+
         # 最终失败处理
         self.screenshot_path = f"error-{self.user.split('@')[0]}.png"
         if self.driver:
