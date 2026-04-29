@@ -276,7 +276,7 @@ class KatabumpAutoRenew:
         # --- 登录页 CF Turnstile 验证（保持不变）---
         self._handle_turnstile("Login Auth")
 
-        logger.info(f"📤 {self.masked_user} - 点击"Login"提交登录...")
+        logger.info(f"📤 {self.masked_user} - 点击 Login 提交登录...")
         self.driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         human_delay()
 
